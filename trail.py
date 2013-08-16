@@ -46,6 +46,7 @@ class Trail(object):
         self._sol = array([])
         self._res = 0
         self._usedLength = 0
+        self._dist = 0
 
         self._projectionMat = array([])
 
@@ -90,7 +91,9 @@ class Trail(object):
     # Returns the parameters of the path, depending of the shape to follow
     # For the base class, it returns the parameters for the equation of a line
     def identify(self):
-        if len(self._args) > 0 and self._args[0] < self._res:
+        if len(self._args) > 1 and self._args[1] < self._res:
+            return array([])
+        if len(self._args) > 0 and self._dist < self._args[0]:
             return array([])
         return self._sol
 
@@ -125,6 +128,7 @@ class Trail(object):
 
         sol, res = self.__trackOnce(array(a), array(b))
         usedLength = self._trackLength
+        dist = sqrt(sum(power(array(a[len(a)-1][:2])-array(a[0][:2]),2)))
 
         while len(a) + self._trackStep <= self._maxLength and len(a) + self._trackStep <= len(self._history):
             for i in range(len(a), len(a) + self._trackStep):
@@ -137,15 +141,19 @@ class Trail(object):
 
             newSol, newRes = self.__trackOnce(array(a), array(b))
             newUsedLength = len(a)
+            newDist = sqrt(sum(power(array(a[len(a)-1][:2])-array(a[0][:2]),2)))            
 
             if newRes < res:
                 sol = newSol
                 res = newRes
                 usedLength = newUsedLength
+            if newDist > dist:
+                dist = newDist
 
         self._sol = sol
         self._res = res
         self._usedLength = usedLength
+        self._dist = dist
 
         return sol, res
 
@@ -168,10 +176,11 @@ class Trail_Circle(Trail):
         it.append(sol[1])
         it.append(sqrt(pow(sol[0], 2.0) + pow(sol[1], 2.0) - sol[2]))
 
-        if len(self._args) > 0 and it[2] > self._args[0]:
+        if len(self._args) > 0 and self._res > self._args[0]:   # resolution
             return array([])
-
-        if len(self._args) > 1 and self._res > self._args[1]:
+        if len(self._args) > 1 and it[2] > self._args[1]:   # too big radius
+            return array([])
+        if len(self._args) > 2 and it[2] < self._args[2]:   # too small radius
             return array([])
 
         # We compute the completeness of the circle
@@ -204,21 +213,31 @@ class Trail_Circle(Trail):
 # Callback used by liblo when a new position for a blob is received
 def trail_callback(path, args, types, src, user_data):
     blobPos = array([args[0], args[1]])
-    blobId = args[5]
+
+    # assign blobId depending if callback comes from HOG or BG-Subtractor
+    if len(args) == 7:      # detector hog
+        blobId = args[4]
+    else:                   # detector bg_subtractor
+        blobId = args[5]
 
     trails = user_data[0]
     maxHistory = user_data[1]
     pointLifetime = user_data[2]
     lineDetectionLevel = user_data[3]
-    circleDetectionLevel = user_data[4]
-    circleMaxRadius = user_data[5]
+    lineMinLength = user_data[4]
+    circleDetectionLevel = user_data[5]
+    circleMaxRadius = user_data[6]
+    circleMinRadius = user_data[7]
+
+    projIN = user_data[8]
+    projOUT = user_data[9]
 
     if trails.has_key(blobId) == False:
         # We set in this list all the shapes we want to detect
         trails[blobId] = [Trail(maxHistory, pointLifetime, [lineDetectionLevel]), 
-                          Trail_Circle(maxHistory, pointLifetime, [circleMaxRadius, circleDetectionLevel])]
+                          Trail_Circle(maxHistory, pointLifetime, [circleDetectionLevel, circleMaxRadius, circleMinRadius])]
         for i in range(len(trails[blobId])):
-            trails[blobId][i].updateProjection(PROJECTION_IN, PROJECTION_OUT)
+            trails[blobId][i].updateProjection(projIN, projOUT)
 
     tPoint = TimedPoint(blobPos)
     trails[blobId][0].follow(tPoint);
@@ -271,7 +290,7 @@ def drawTrails(trails):
         cv.imwrite("img_" + str(FRAMENUMBER) + ".png", img)
 
 #*************#
-def mainLoop(maxHistory = 50, pointLifetime = 1e6, lineDetectionLevel = 64, circleDetectionLevel = 8192, circleMaxRadius = 256):
+def mainLoop(maxHistory = 50, pointLifetime = 1e6, lineDetectionLevel = 64, lineMinLength = 100, circleDetectionLevel = 8192, circleMaxRadius = 256, circleMinRadius = 30):
     global FRAMENUMBER
     try:
         oscServer = liblo.Server(9000);
@@ -280,9 +299,10 @@ def mainLoop(maxHistory = 50, pointLifetime = 1e6, lineDetectionLevel = 64, circ
         sys.exit()
 
     trails = {}
-    user_data = [trails, maxHistory, pointLifetime, lineDetectionLevel, circleDetectionLevel, circleMaxRadius]
+    user_data = [trails, maxHistory, pointLifetime, lineDetectionLevel, lineMinLength, circleDetectionLevel, circleMaxRadius, circleMinRadius, PROJECTION_IN, PROJECTION_OUT]
     # Position of the blobs is set using a callback of liblo
     oscServer.add_method("/blobserver/bgsubtractor", "iiiffiii", trail_callback, user_data)
+    oscServer.add_method("/blobserver/hog", "iiffiii", trail_callback, user_data)
     
     while True:
         if VERBOSE:
@@ -307,14 +327,14 @@ def mainLoop(maxHistory = 50, pointLifetime = 1e6, lineDetectionLevel = 64, circ
             trails.pop(i)
 
         if SHOW_CV:
-            drawTrails(trails)
+            drawTrails(trails, IMAGE_SIZE)
 
         cv.waitKey(5)
         FRAMENUMBER += 1
 
 #*************#
 def usage():
-    print("Usage: trail.py [maxHistory [pointLifetime [lineDetectionLevel [circleDetectionLevel [circleMaxRadius]]]]]")
+    print("Usage: trail.py [maxHistory [pointLifetime [lineDetectionLevel [ lineMinLength [circleDetectionLevel [circleMaxRadius[circleMinRadius]]]]]]]")
 
 #*************#
 if __name__ == "__main__":
@@ -323,19 +343,23 @@ if __name__ == "__main__":
         usage()
         sys.exit()
 
-    maxHistory = 50
+    maxHistory = 150
     pointLifetime = 1e6
-    lineDetectionLevel = 64
-    circleDetectionLevel = 8192
-    circleMaxRadius = 256
+    lineDetectionLevel = 5
+    lineMinLength = 200
+    circleDetectionLevel = 500
+    circleMaxRadius = 200
+    circleMinRadius = 30
 
     try:
         maxHistory = float(sys.argv[1])
         pointLifetime = float(sys.argv[2])
         lineDetectionLevel = float(sys.argv[3])
-        circleDetectionLevel = float(sys.argv[4])
-        circleMaxRadius = float(sys.argv[5])
+        lineMinLength = float(sys.argv[4])
+        circleDetectionLevel = float(sys.argv[5])
+        circleMaxRadius = float(sys.argv[6])
+        circleMinRadius = float(sys.arg[7])
     except:
         usage()
 
-    mainLoop(maxHistory, pointLifetime, lineDetectionLevel, circleDetectionLevel, circleMaxRadius)
+    mainLoop(maxHistory, pointLifetime, lineDetectionLevel, lineMinLength, circleDetectionLevel, circleMaxRadius, circleMinRadius)
