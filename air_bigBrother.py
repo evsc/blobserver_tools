@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+# Big Brother for Amateur Intelligence Radio
+
 from trail import *
 
 
